@@ -134,7 +134,7 @@ async function fetchGroqPlan(goalData: any, apiKey: string) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
+      model: "qwen/qwen3.8-27b",
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" },
       temperature: 0.2,
@@ -559,7 +559,7 @@ async function fetchGroqMissionCommand(compressedGoals: any[], apiKey: string) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "llama-3.1-8b-instant",
+      model: "qwen/qwen3.8-27b",
       messages: [{ role: "user", content: prompt }],
       response_format: { type: "json_object" },
       temperature: 0.2,
@@ -922,40 +922,76 @@ function getLocalMissionCommand(goals: any[]) {
   };
 }
 
-export async function askJarvisAgent(userQuery: string, goals: any[], selectedGoalId: string | null): Promise<{ speech: string; command?: string; parameter?: string }> {
+export interface JarvisAgentResult {
+  speech: string;
+  command?: string | null;
+  parameter?: string | null;
+  targetGoalId?: string | null;
+  targetGoalTitle?: string | null;
+  goalData?: {
+    title: string;
+    description?: string;
+    category?: string;
+    days?: number;
+    hoursPerDay?: number;
+    priority?: "low" | "medium" | "high";
+  } | null;
+}
+
+export async function askJarvisAgent(userQuery: string, goals: any[], selectedGoalId: string | null): Promise<JarvisAgentResult> {
   const context = goals.map(g => ({
     id: g.id,
     title: g.title,
     daysRemaining: g.daysRemaining,
     completionProbability: g.completionProbability,
+    status: g.status,
     category: g.category,
     pendingMilestone: g.milestones?.find((m: any) => m.status === 'pending')?.title || ""
   }));
 
   const prompt = `
-You are Jarvis, the user's personal AI productivity assistant.
+You are Jarvis, an advanced personal AI productivity assistant for the ATLAST platform.
 The user says: "${userQuery}"
 
-Active Goals:
+Active/Known Goals Context:
 ${JSON.stringify(context, null, 2)}
 Selected Goal ID: ${selectedGoalId || "none"}
 
-Your response must be JSON only. Return ONLY this structure:
+Your task:
+1. If the user wants to take an action or make changes:
+   - "create_goal": User wants to create or add a new goal. Return "goalData" with:
+       "title": clean title (e.g. "Learn Python", "Placement Preparation"),
+       "category": best matching ("Skill" | "Exam" | "Coding" | "Project" | "Habit" | "Life"),
+       "days": estimated duration in days (default 30 unless user requested a specific timeframe),
+       "hoursPerDay": daily hours (default 1 or 2),
+       "priority": "low" | "medium" | "high" (default "medium")
+   - "delete_goal": User wants to delete or remove a goal. Identify matching goal from context and return "targetGoalId" and "targetGoalTitle".
+   - "archive_goal": User wants to archive a goal. Return matching "targetGoalId" and "targetGoalTitle".
+   - "unarchive_goal": User wants to unarchive or restore a goal. Return matching "targetGoalId" and "targetGoalTitle".
+   - "complete_milestone": User completed or wants to check off a task/milestone. Return "targetGoalId" if known.
+   - "accept_replanning": User wants to accept the AI replanning or recovery plan.
+   - "open_goal": User wants to inspect or open a specific goal. Return matching "targetGoalId" and "targetGoalTitle".
+   - "go_to_dashboard": User wants to go to dashboard or home.
+2. If the user is asking a general question, asking for productivity tips, advice, or chatting:
+   - Provide a helpful, intelligent, supportive spoken answer (1-3 sentences) inside "speech".
+   - Set "command" to null.
+3. "speech" MUST ALWAYS contain polite, spoken feedback suitable for speech synthesis (start or end with a respectful 'sir').
+
+Return JSON ONLY:
 {
-  "speech": "concise spoken feedback to the user (max 2 sentences, start or end with a respectful 'sir')",
-  "command": "optional_command_name",
-  "parameter": "optional_parameter"
+  "speech": "spoken feedback to user",
+  "command": null or command name,
+  "parameter": null or string parameter,
+  "targetGoalId": null or string,
+  "targetGoalTitle": null or string,
+  "goalData": null or {
+    "title": "Goal Title",
+    "category": "Skill",
+    "days": 30,
+    "hoursPerDay": 2,
+    "priority": "medium"
+  }
 }
-
-Allowed commands:
-- "go_to_dashboard" (user wants dashboard or home)
-- "create_goal" (user wants to create a new goal; parameter is the clean goal title)
-- "open_goal" (user wants to open or see insights of a goal; parameter is the matching goal title)
-- "delete_goal" (user wants to delete a goal; parameter is the matching goal title or 'current')
-- "archive_goal" (user wants to archive a goal; parameter is the matching goal title or 'current')
-- "complete_milestone" (user completed or wants to complete their current milestone)
-
-If the user is asking a general question, just reply with a helpful answer inside "speech" and omit "command".
 `;
 
   try {
@@ -975,7 +1011,9 @@ If the user is asking a general question, just reply with a helpful answer insid
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) throw new Error("Empty response");
-    return JSON.parse(text.trim());
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error("No JSON in response");
+    return JSON.parse(match[0]);
   } catch (e) {
     try {
       if (!GROQ_API_KEY) throw new Error("Groq API key missing");
@@ -986,7 +1024,7 @@ If the user is asking a general question, just reply with a helpful answer insid
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "llama-3.1-8b-instant",
+          model: "qwen/qwen3.8-27b",
           messages: [{ role: "user", content: prompt }],
           response_format: { type: "json_object" },
           temperature: 0.2
@@ -995,9 +1033,12 @@ If the user is asking a general question, just reply with a helpful answer insid
       if (!response.ok) throw new Error(`Groq status ${response.status}`);
       const data = await response.json();
       const text = data?.choices?.[0]?.message?.content || "";
-      return JSON.parse(text.trim());
+      const match = text.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("No JSON in response");
+      return JSON.parse(match[0]);
     } catch (err) {
       throw new Error("API failed");
     }
   }
 }
+

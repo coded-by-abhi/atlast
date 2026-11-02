@@ -463,56 +463,127 @@ function App() {
     );
   };
 
-  const handleVoiceCommand = async (command: string, parameter?: string) => {
-    console.log("Jarvis execute command:", command, "with:", parameter);
+  const findTargetGoal = (identifier?: string): Goal | undefined => {
+    if (!goals || goals.length === 0) return undefined;
+    if (!identifier || identifier === "current" || identifier === "this") {
+      return goals.find(g => g.id === selectedGoalId) || goals.find(g => g.status !== "archived") || goals[0];
+    }
+    const clean = identifier.toLowerCase().replace(/\b(the|goal|my|a|an)\b/g, "").replace(/[^a-z0-9\s]/g, "").trim();
+    
+    // 1. Exact ID
+    const byId = goals.find(g => g.id === identifier);
+    if (byId) return byId;
+
+    // 2. Exact Title
+    const byExactTitle = goals.find(g => g.title.toLowerCase() === identifier.toLowerCase());
+    if (byExactTitle) return byExactTitle;
+
+    // 3. Clean Title
+    const byClean = goals.find(g => {
+      const t = g.title.toLowerCase().replace(/\b(the|goal|my|a|an)\b/g, "").replace(/[^a-z0-9\s]/g, "").trim();
+      return t === clean;
+    });
+    if (byClean) return byClean;
+
+    // 4. Substring in either direction
+    const bySub = goals.find(g => {
+      const t = g.title.toLowerCase();
+      return t.includes(clean) || clean.includes(t);
+    });
+    if (bySub) return bySub;
+
+    // 5. Significant word overlap
+    const words = clean.split(/\s+/).filter(w => w.length > 2);
+    if (words.length > 0) {
+      const byWord = goals.find(g => {
+        const t = g.title.toLowerCase();
+        return words.some(w => t.includes(w));
+      });
+      if (byWord) return byWord;
+    }
+
+    return goals.find(g => g.id === selectedGoalId) || goals[0];
+  };
+
+  const handleVoiceCommand = async (command: string, parameter?: any, extraData?: any) => {
+    console.log("Jarvis execute command:", command, "param:", parameter, "extra:", extraData);
     
     if (command === "go_to_dashboard") {
       setCurrentPage("dashboard");
       return;
     }
 
-    if (command === "create_goal" && parameter) {
-      setJarvisPrefilledTitle(parameter);
-      setCurrentPage("create");
+    if (command === "create_goal") {
+      const goalData = extraData?.goalData || (typeof parameter === "object" ? parameter : null);
+      const title = goalData?.title || (typeof parameter === "string" ? parameter : "New Goal");
+      const category = goalData?.category || "Skill";
+      const hoursPerDay = Number(goalData?.hoursPerDay) || 2;
+      const priority = (goalData?.priority as "low" | "medium" | "high") || "medium";
+      const days = Number(goalData?.days) || 30;
+
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      const deadline = d.toISOString().slice(0, 10);
+
+      await handleAddGoal({
+        title,
+        description: goalData?.description || `Autonomous AI goal created via Jarvis command: ${title}`,
+        deadline,
+        priority,
+        category,
+        hoursPerDay,
+      });
       return;
     }
 
-    if (command === "open_goal" && parameter) {
-      const match = goals.find(g => g.title.toLowerCase().includes(parameter.toLowerCase()));
-      if (match) {
-        setSelectedGoalId(match.id);
+    if (command === "delete_goal") {
+      const target = findTargetGoal(extraData?.targetGoalId || extraData?.targetGoalTitle || parameter);
+      if (target) {
+        handleDeleteGoal(target.id);
+      }
+      return;
+    }
+
+    if (command === "archive_goal") {
+      const target = findTargetGoal(extraData?.targetGoalId || extraData?.targetGoalTitle || parameter);
+      if (target) {
+        handleArchiveGoal(target.id);
+      }
+      return;
+    }
+
+    if (command === "unarchive_goal" || command === "reopen_goal") {
+      const target = findTargetGoal(extraData?.targetGoalId || extraData?.targetGoalTitle || parameter);
+      if (target) {
+        handleReopenGoal(target.id);
+      }
+      return;
+    }
+
+    if (command === "open_goal") {
+      const target = findTargetGoal(extraData?.targetGoalId || extraData?.targetGoalTitle || parameter);
+      if (target) {
+        setSelectedGoalId(target.id);
         setCurrentPage("intelligence");
       }
       return;
     }
 
     if (command === "complete_milestone") {
-      const activeGoal = goals.find(g => g.id === selectedGoalId) || goals[0];
-      if (activeGoal) {
-        const firstPending = activeGoal.milestones.find(m => m.status === "pending");
+      const target = findTargetGoal(extraData?.targetGoalId || extraData?.targetGoalTitle || parameter);
+      if (target) {
+        const firstPending = target.milestones.find(m => m.status === "pending");
         if (firstPending) {
-          handleCompleteMilestone(activeGoal.id, firstPending.id);
+          handleCompleteMilestone(target.id, firstPending.id);
         }
       }
       return;
     }
 
-    if (command === "archive_goal") {
-      const activeGoal = (parameter && parameter !== "current")
-        ? goals.find(g => g.title.toLowerCase().includes(parameter.toLowerCase()))
-        : (goals.find(g => g.id === selectedGoalId) || goals[0]);
-      if (activeGoal) {
-        handleArchiveGoal(activeGoal.id);
-      }
-      return;
-    }
-
-    if (command === "delete_goal") {
-      const activeGoal = (parameter && parameter !== "current")
-        ? goals.find(g => g.title.toLowerCase().includes(parameter.toLowerCase()))
-        : (goals.find(g => g.id === selectedGoalId) || goals[0]);
-      if (activeGoal) {
-        handleDeleteGoal(activeGoal.id);
+    if (command === "accept_replanning") {
+      const target = goals.find(g => g.replanningProposal) || findTargetGoal(parameter);
+      if (target && target.replanningProposal) {
+        handleAcceptReplanning(target.id);
       }
       return;
     }
